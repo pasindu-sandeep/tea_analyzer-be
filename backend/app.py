@@ -3,15 +3,17 @@ import joblib
 import pandas as pd
 import tempfile
 import numpy as np
+import torch
 
 from flask import Flask, request, jsonify
 from ultralytics import YOLO
 
 # -----------------------------------
-# Prevent Torch / OpenMP thread issues (Mac fix)
+# Prevent Torch / OpenMP thread issues
 # -----------------------------------
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+torch.set_num_threads(1)
 
 app = Flask(__name__)
 
@@ -19,13 +21,26 @@ app = Flask(__name__)
 # Safe Base Directory
 # -----------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-# -----------------------------------
-# Load Models Once at Startup
-# -----------------------------------
-model = joblib.load(os.path.join(BASE_DIR, "models", "tea_price_model.pkl"))
-cls_model = YOLO(os.path.join(BASE_DIR, "models", "best.pt"))
-soil_model = joblib.load(os.path.join(BASE_DIR, "models", "soil_analyzer.pkl"))
+# Tea Price Model
+try:
+    tea_model = joblib.load(os.path.join(MODEL_DIR, "tea_price_model.pkl"))
+except Exception as e:
+    tea_model = None
+
+# YOLO Classification Model
+try:
+    cls_model = YOLO(os.path.join(MODEL_DIR, "best.pt"))
+except Exception as e:
+    cls_model = None
+
+# Soil Model
+try:
+    soil_model = joblib.load(os.path.join(MODEL_DIR, "soil_analyzer.pkl"))
+except Exception as e:
+    soil_model = None
+
 
 # -----------------------------------
 # Health Check
@@ -40,13 +55,22 @@ def home():
 # -----------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
+    if tea_model is None:
+        return jsonify({
+            "success": False,
+            "error": "Tea price model not available"
+        }), 500
+
     try:
         data = request.get_json()
 
         if not data:
-            return jsonify({"success": False, "error": "No JSON body provided"}), 400
+            return jsonify({
+                "success": False,
+                "error": "No JSON body provided"
+            }), 400
 
-        missing = [f for f in model.feature_names_in_ if f not in data]
+        missing = [f for f in tea_model.feature_names_in_ if f not in data]
         if missing:
             return jsonify({
                 "success": False,
@@ -54,9 +78,9 @@ def predict():
             }), 400
 
         df = pd.DataFrame([data])
-        df = df[model.feature_names_in_]
+        df = df[tea_model.feature_names_in_]
 
-        prediction = model.predict(df)[0]
+        prediction = tea_model.predict(df)[0]
 
         return jsonify({
             "success": True,
@@ -69,40 +93,37 @@ def predict():
             "error": str(e)
         }), 400
 
-
 # -----------------------------------
 # Image Classification
 # -----------------------------------
 @app.route("/classify", methods=["POST"])
 def classify_image():
+    if cls_model is None:
+        return jsonify({
+            "success": False,
+            "error": "YOLO model not available"
+        }), 500
+
     temp_path = None
 
     try:
         if "image" not in request.files:
-            return jsonify({
-                "success": False,
-                "error": "No image file provided"
-            }), 400
+            return jsonify({"success": False, "error": "No image file provided"}), 400
 
         file = request.files["image"]
 
         if file.filename == "":
-            return jsonify({
-                "success": False,
-                "error": "Empty filename"
-            }), 400
+            return jsonify({"success": False, "error": "Empty filename"}), 400
 
         # Save image temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp:
             file.save(temp.name)
             temp_path = temp.name
 
-        # Run prediction
         results = cls_model.predict(temp_path, verbose=False)
 
         probs_tensor = results[0].probs.data
         probs = probs_tensor.cpu().numpy()
-
         class_names = cls_model.names
 
         probabilities = {
@@ -138,6 +159,9 @@ def classify_image():
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
+# -----------------------------------
+# Soil Analysis
+# -----------------------------------
 SOIL_FEATURES = [
     "Nitrogen",
     "Phosphorus",
@@ -146,11 +170,14 @@ SOIL_FEATURES = [
     "Moisture"
 ]
 
-# -----------------------------------
-# Soil Analysis
-# -----------------------------------
 @app.route("/analyze-soil", methods=["POST"])
 def analyze_soil():
+    if soil_model is None:
+        return jsonify({
+            "success": False,
+            "error": "Soil model not available"
+        }), 500
+
     try:
         data = request.get_json()
 
@@ -160,7 +187,6 @@ def analyze_soil():
                 "error": "No JSON body provided"
             }), 400
 
-        # Validate fields
         missing = [f for f in SOIL_FEATURES if f not in data]
         if missing:
             return jsonify({
@@ -168,18 +194,16 @@ def analyze_soil():
                 "error": f"Missing fields: {missing}"
             }), 400
 
-        # Convert to numpy array in correct order
         input_data = np.array([[data[f] for f in SOIL_FEATURES]])
 
         prediction = soil_model.predict(input_data)
 
-        # If classification
-        predicted_class = np.argmax(prediction)
+        predicted_class = int(np.argmax(prediction))
         confidence = float(np.max(prediction) * 100)
 
         return jsonify({
             "success": True,
-            "predicted_class": int(predicted_class),
+            "predicted_class": predicted_class,
             "confidence_percent": round(confidence, 2)
         })
 
