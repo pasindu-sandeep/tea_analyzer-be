@@ -2,6 +2,7 @@ import os
 import tempfile
 import numpy as np
 import torch
+from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify
 from ultralytics import YOLO
@@ -302,6 +303,63 @@ def tea_price_endpoint():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
 
+@app.route("/soil-history", methods=["POST"])
+def soil_history():
+
+    try:
+        data = request.get_json()
+
+        start_date_str = data.get("start_date")
+        end_date_str = data.get("end_date")
+
+        if not start_date_str or not end_date_str:
+            return jsonify({
+                "success": False,
+                "error": "start_date and end_date required"
+            }), 400
+
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d %H:%M:%S")
+        end_date = datetime.strptime(end_date_str, "%Y-%m-%d %H:%M:%S")
+
+        if start_date > end_date:
+            return jsonify({
+                "success": False,
+                "error": "start_date must be before end_date"
+            }), 400
+
+        # ---- Generate Hourly Mock Data ----
+        current = start_date
+        hourly_data = []
+
+        while current <= end_date:
+
+            hourly_data.append({
+                "timestamp": current.strftime("%Y-%m-%d %H:%M:%S"),
+                "Nitrogen": round(np.random.uniform(45, 65), 2),
+                "Phosphorus": round(np.random.uniform(22, 35), 2),
+                "Potassium": round(np.random.uniform(50, 70), 2),
+                "pH": round(np.random.uniform(6.1, 6.8), 2),
+                "Moisture": round(np.random.uniform(35, 50), 2),
+                "Temperature": round(np.random.uniform(24, 30), 2),
+                "Humidity": round(np.random.uniform(65, 80), 2),
+                "Rainfall": round(np.random.uniform(0, 10), 2)
+            })
+
+            current += timedelta(hours=1)
+
+        return jsonify({
+            "success": True,
+            "start_date": start_date_str,
+            "end_date": end_date_str,
+            "total_records": len(hourly_data),
+            "hourly_data": hourly_data
+        })
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 # -----------------------------------
 # Run Server
