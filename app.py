@@ -3,9 +3,14 @@ import tempfile
 import numpy as np
 import torch
 from datetime import datetime, timedelta
-
+from google.cloud import storage
+import base64
 from flask import Flask, request, jsonify
 from ultralytics import YOLO
+from PIL import Image
+import io
+import storage as st
+import database.db_connect as db
 
 # -----------------------------------
 # Prevent Torch / OpenMP thread issues
@@ -15,7 +20,7 @@ os.environ["MKL_NUM_THREADS"] = "1"
 torch.set_num_threads(1)
 
 app = Flask(__name__)
-
+disease_model = YOLO('best2.pt') 
 # -----------------------------------
 # Safe Base Directory
 # -----------------------------------
@@ -360,7 +365,341 @@ def soil_history():
             "success": False,
             "error": str(e)
         }), 500
+    
+@app.route('/predict', methods=['POST'])
+def predict():
+    if 'image' not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
 
+    file = request.files['image']
+    img = Image.open(file.stream)
+    
+    # Run Inference
+    results = disease_model(img)[0]
+    
+    # dictionary to hold your desired format: {"ClassName": total_pixels}
+    predictions = {}
+    
+    if results.masks is not None:
+        # Move to CPU and convert to numpy for pixel counting
+        masks = results.masks.data.cpu().numpy()
+        classes = results.boxes.cls.cpu().numpy()
+        
+        for i, mask in enumerate(masks):
+            class_name = results.names[int(classes[i])]
+            pixel_count = int(np.sum(mask > 0))
+            
+            # Aggregate the sum for each class
+            predictions[class_name] = predictions.get(class_name, 0) + pixel_count
+
+    # Process the result image (Clean: no boxes/labels)
+    res_plotted = results.plot(labels=False, boxes=False)
+    res_img = Image.fromarray(res_plotted[:, :, ::-1])
+
+    # Encode Image to Base64
+    buffered = io.BytesIO()
+    res_img.save(buffered, format="JPEG")
+    img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+    return jsonify({
+        "status": "success",
+        "predictions": predictions,
+        "image": img_str
+    })
+
+@app.route("/create-bid", methods=["POST"])
+def create_bid():
+
+    try:
+        file = request.files["image"]
+        name = request.form.get("name")
+        description = request.form.get("description")
+        owner_id = request.form.get("owner_id")
+        starting_price = request.form.get("starting_price")
+
+        image_url = st.upload_image(file)
+
+        created_at = datetime.utcnow()
+
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+
+        query = """
+        INSERT INTO bids
+        (name, description, owner_id, starting_price, image_url, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """
+
+        cur.execute(query, (
+            name,
+            description,
+            owner_id,
+            starting_price,
+            image_url,
+            created_at
+        ))
+
+        bid_id = cur.fetchone()[0]
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": "Bid created successfully",
+            "bid_id": bid_id,
+            "image_url": image_url
+        }), 201
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/bids", methods=["GET"])
+def list_bids():
+    try:
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, description, owner_id, starting_price, image_url, created_at FROM bids ORDER BY created_at DESC")
+        bids = cur.fetchall()
+        cur.close()
+        conn.close()
+        bid_list = [
+            {
+                "id": row[0],
+                "name": row[1],
+                "description": row[2],
+                "owner_id": row[3],
+                "starting_price": row[4],
+                "image_url": row[5],
+                "created_at": row[6].isoformat() if row[6] else None
+            }
+            for row in bids
+        ]
+        return jsonify({"bids": bid_list}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/bid/<int:bid_id>", methods=["DELETE"])
+def delete_bid(bid_id):
+    try:
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM bids WHERE id = %s RETURNING id", (bid_id,))
+        deleted = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        if deleted:
+            return jsonify({"message": "Bid deleted successfully", "bid_id": bid_id}), 200
+        else:
+            return jsonify({"error": "Bid not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/register", methods=["POST"])
+def register():
+    try:
+        print("FORM DATA:", request.form)
+        print("FILES:", request.files)
+
+        username = request.form.get("username")
+        email = request.form.get("email")
+        phone = request.form.get("phone")
+        password = request.form.get("password")
+
+        profile_picture = request.files.get("profile_picture")
+
+        # Validation
+        if not username:
+            return jsonify({"error": "username is required"}), 400
+        if not email:
+            return jsonify({"error": "email is required"}), 400
+        if not phone:
+            return jsonify({"error": "phone is required"}), 400
+        if not password:
+            return jsonify({"error": "password is required"}), 400
+
+        profile_image_url = None
+
+        # Upload image if provided
+        if profile_picture:
+            profile_image_url = st.upload_image(profile_picture)
+
+        created_at = datetime.utcnow()
+
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+
+        query = """
+        INSERT INTO users (username, email, phone, profile_image_url, password, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s)
+        RETURNING id
+        """
+
+        cur.execute(query, (
+            username,
+            email,
+            phone,
+            profile_image_url,
+            password,
+            created_at
+        ))
+
+        user_id = cur.fetchone()[0]
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": "User registered successfully",
+            "user_id": user_id,
+            "username": username,
+            "email": email,
+            "phone": phone,
+            "profile_picture_url": profile_image_url
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/login", methods=["POST"])
+def login():
+    try:
+        username = request.json.get("username")
+        password = request.json.get("password")
+
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+
+        query = """
+        SELECT id, username, email, phone, profile_image_url, password
+        FROM users
+        WHERE username=%s
+        """
+
+        cur.execute(query, (username,))
+        user = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        user_id, username, email, phone, profile_image_url, db_password = user
+
+        if password == db_password:
+
+            return jsonify({
+                "message": "Login successful",
+                "user_id": user_id,
+                "user_name": username,
+                "email": email,
+                "phone_number": phone,
+                "profile_picture_url": profile_image_url
+            })
+
+        else:
+            return jsonify({"error": "Invalid password"}), 401
+
+    except Exception as e:
+        return jsonify({"error": str(e)})
+    
+@app.route("/update-profile-picture", methods=["POST"])
+def update_profile_picture():
+    try:
+        user_id = request.form.get("user_id")
+        profile_picture = request.files.get("profile_picture")
+
+        if not profile_picture:
+            return jsonify({"error": "No image provided"}), 400
+
+        image_url = st.upload_image(profile_picture)
+
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+
+        query = """
+        UPDATE users
+        SET profile_image_url=%s
+        WHERE id=%s
+        """
+
+        cur.execute(query, (image_url, user_id))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": "Profile picture updated",
+            "profile_picture_url": image_url
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+@app.route("/update-phone", methods=["POST"])
+def update_phone():
+    try:
+        user_id = request.json.get("user_id")
+        phone = request.json.get("phone")
+
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+
+        query = """
+        UPDATE users
+        SET phone=%s
+        WHERE id=%s
+        """
+
+        cur.execute(query, (phone, user_id))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": "Phone number updated",
+            "phone_number": phone
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)})
+    
+@app.route("/update-email", methods=["POST"])
+def update_email():
+    try:
+        user_id = request.json.get("user_id")
+        email = request.json.get("email")
+
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+
+        query = """
+        UPDATE users
+        SET email=%s
+        WHERE id=%s
+        """
+
+        cur.execute(query, (email, user_id))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "message": "Email updated",
+            "email": email
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)})
+    
 # -----------------------------------
 # Run Server
 # -----------------------------------
