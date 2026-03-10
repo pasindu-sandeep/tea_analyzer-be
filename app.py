@@ -136,7 +136,34 @@ def calculate_score(value, min_val, max_val):
         range_span = max_val - min_val
         penalty = (deviation / range_span) * 100
         return max(0.0, 100 - penalty)
-
+    
+def get_fertilizer_recommendation(parameter_analysis):
+    """
+    Predicts fertilizer type and amount based on soil scores.
+    """
+    n_score = parameter_analysis["Nitrogen"]["score_percent"]
+    p_score = parameter_analysis["Phosphorus"]["score_percent"]
+    k_score = parameter_analysis["Potassium"]["score_percent"]
+    
+    # Identify deficiencies
+    deficiencies = []
+    if n_score < 80: deficiencies.append("Nitrogen")
+    if p_score < 80: deficiencies.append("Phosphorus")
+    if k_score < 80: deficiencies.append("Potassium")
+    
+    # Logic for Fertilizer Type
+    if not deficiencies:
+        return "Balanced Organic Compost", "Apply 2-5 kg per plant annually for maintenance."
+    
+    if "Nitrogen" in deficiencies and p_score >= 80 and k_score >= 80:
+        return "Urea (46-0-0)", "Apply 50g per plant."
+    elif "Phosphorus" in deficiencies:
+        return "Triple Super Phosphate (0-46-0)", "Apply 30g per plant."
+    elif "Potassium" in deficiencies:
+        return "Muriate of Potash (0-0-60)", "Apply 40g per plant."
+    else:
+        # Complex deficiency
+        return "NPK 15-15-15 Balanced Mix", "Apply 100g per plant to address overall nutrient levels."
 
 @app.route("/analyze-soil", methods=["POST"])
 def analyze_soil():
@@ -184,11 +211,17 @@ def analyze_soil():
         else:
             soil_condition = "Poor - Not Suitable"
 
+        fert_type, fert_amount = get_fertilizer_recommendation(results)
+
         return jsonify({
             "success": True,
             "overall_soil_quality_percent": overall_score,
             "soil_condition": soil_condition,
-            "parameter_analysis": results
+            "parameter_analysis": results,
+            "fertilizer_recommendation": {
+                "type": fert_type,
+                "dosage": fert_amount
+            }
         })
 
     except Exception as e:
