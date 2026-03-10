@@ -409,7 +409,6 @@ def predict():
 
 @app.route("/create-bid", methods=["POST"])
 def create_bid():
-
     try:
         file = request.files["image"]
         name = request.form.get("name")
@@ -417,29 +416,26 @@ def create_bid():
         owner_id = request.form.get("owner_id")
         starting_price = request.form.get("starting_price")
 
-        image_url = st.upload_image(file)
+        # --- Local Save Logic ---
+        # Generate a unique filename using timestamp to avoid collisions
+        filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{file.filename}"
+        file_path = os.path.join("images", filename)
+        file.save(file_path)
+        
+        # Use a relative path or a local URL for the DB
+        image_url = f"/images/{filename}" 
+        # ------------------------
 
         created_at = datetime.utcnow()
-
         conn = db.get_db_connection()
         cur = conn.cursor()
 
         query = """
-        INSERT INTO bids
-        (name, description, owner_id, starting_price, image_url, created_at)
+        INSERT INTO bids (name, description, owner_id, starting_price, image_url, created_at)
         VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING id
         """
-
-        cur.execute(query, (
-            name,
-            description,
-            owner_id,
-            starting_price,
-            image_url,
-            created_at
-        ))
-
+        cur.execute(query, (name, description, owner_id, starting_price, image_url, created_at))
         bid_id = cur.fetchone()[0]
 
         conn.commit()
@@ -464,19 +460,39 @@ def list_bids():
         bids = cur.fetchall()
         cur.close()
         conn.close()
-        bid_list = [
-            {
+
+        bid_list = []
+        for row in bids:
+            db_path = row[5]  # This is e.g., "/images/20260310092626_PoliceKolama.png"
+            base64_image = None
+
+            if db_path:
+                # 1. Get the actual filename from the DB path
+                filename = os.path.basename(db_path)
+                # 2. Construct the full path on the server's disk
+                full_path = os.path.join("images", filename)
+
+                # 3. Check if the file actually exists on the server
+                if os.path.exists(full_path):
+                    try:
+                        with open(full_path, "rb") as img_file:
+                            # Convert to base64
+                            base64_image = base64.b64encode(img_file.read()).decode('utf-8')
+                    except Exception:
+                        base64_image = None # If file is corrupted or unreadable
+
+            bid_list.append({
                 "id": row[0],
                 "name": row[1],
                 "description": row[2],
                 "owner_id": row[3],
                 "starting_price": row[4],
-                "image_url": row[5],
+                "image_data": base64_image, # Now sending the encoded string
                 "created_at": row[6].isoformat() if row[6] else None
-            }
-            for row in bids
-        ]
+            })
+
         return jsonify({"bids": bid_list}), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
