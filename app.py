@@ -456,42 +456,49 @@ def list_bids():
     try:
         conn = db.get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT id, name, description, owner_id, starting_price, image_url, created_at FROM bids ORDER BY created_at DESC")
+        cur.execute("SELECT id, name, description, owner_id, starting_price, created_at FROM bids ORDER BY created_at DESC")
         bids = cur.fetchall()
         cur.close()
         conn.close()
 
-        bid_list = []
-        for row in bids:
-            db_path = row[5]  # This is e.g., "/images/20260310092626_PoliceKolama.png"
-            base64_image = None
-
-            if db_path:
-                # 1. Get the actual filename from the DB path
-                filename = os.path.basename(db_path)
-                # 2. Construct the full path on the server's disk
-                full_path = os.path.join("images", filename)
-
-                # 3. Check if the file actually exists on the server
-                if os.path.exists(full_path):
-                    try:
-                        with open(full_path, "rb") as img_file:
-                            # Convert to base64
-                            base64_image = base64.b64encode(img_file.read()).decode('utf-8')
-                    except Exception:
-                        base64_image = None # If file is corrupted or unreadable
-
-            bid_list.append({
+        bid_list = [
+            {
                 "id": row[0],
                 "name": row[1],
                 "description": row[2],
                 "owner_id": row[3],
                 "starting_price": row[4],
-                "image_data": base64_image, # Now sending the encoded string
-                "created_at": row[6].isoformat() if row[6] else None
-            })
-
+                "created_at": row[5].isoformat() if row[5] else None
+            }
+            for row in bids
+        ]
         return jsonify({"bids": bid_list}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route("/bid-image/<int:bid_id>", methods=["GET"])
+def get_bid_image(bid_id):
+    try:
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT image_url FROM bids WHERE id = %s", (bid_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row or not row[0]:
+            return jsonify({"error": "Image not found for this bid"}), 404
+
+        db_path = row[0]
+        filename = os.path.basename(db_path)
+        full_path = os.path.join("images", filename)
+
+        if os.path.exists(full_path):
+            with open(full_path, "rb") as img_file:
+                base64_image = base64.b64encode(img_file.read()).decode('utf-8')
+            return jsonify({"bid_id": bid_id, "image_data": base64_image}), 200
+        else:
+            return jsonify({"error": "Image file does not exist on server"}), 404
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -715,6 +722,58 @@ def update_email():
 
     except Exception as e:
         return jsonify({"error": str(e)})
+    
+@app.route("/place-bid", methods=["POST"])
+def place_bid():
+    try:
+        data = request.get_json()
+        item_id = data.get("item_id")
+        user_id = data.get("user_id")
+        amount = data.get("amount")
+
+        if not item_id or not user_id or not amount:
+            return jsonify({"error": "Missing item_id, user_id, or amount"}), 400
+
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+
+        # Optional: Check if the bid amount is higher than the starting price or current max bid
+        # For simplicity, we just insert the bid
+        query = """
+        INSERT INTO bids_activity (item_id, user_id, amount, created_at)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+        """
+        cur.execute(query, (item_id, user_id, amount, datetime.utcnow()))
+        bid_id = cur.fetchone()[0]
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"message": "Bid placed successfully", "bid_id": bid_id}), 201
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route("/item-bids/<int:item_id>", methods=["GET"])
+def get_item_bids(item_id):
+    try:
+        conn = db.get_db_connection()
+        cur = conn.cursor()
+        query = "SELECT user_id, amount, created_at FROM bids_activity WHERE item_id = %s ORDER BY amount DESC"
+        cur.execute(query, (item_id,))
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        bid_history = [
+            {"user_id": row[0], "amount": float(row[1]), "time": row[2].isoformat()}
+            for row in results
+        ]
+        return jsonify({"item_id": item_id, "bids": bid_history}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
     
 # -----------------------------------
 # Run Server
